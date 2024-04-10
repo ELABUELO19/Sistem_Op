@@ -1,0 +1,255 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <time.h>
+
+#define BOARD_SIZE 10
+#define MSG_SIZE 50
+
+typedef struct {
+    int x;
+    int y;
+    int size;
+    char orientation;
+    int hits;
+} Ship;
+
+typedef struct {
+    char board[BOARD_SIZE][BOARD_SIZE];
+    Ship ships[5];
+} Board;
+
+void initialize_board(Board *board) {
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            board->board[i][j] = '-';
+        }
+    }
+}
+
+void place_ship(Board *board, int ship_size) {
+    Ship ship;
+    ship.size = ship_size;
+    ship.hits = 0;
+
+    ship.x = rand() % BOARD_SIZE;
+    ship.y = rand() % BOARD_SIZE;
+
+    if (rand() % 2 == 0) {
+        ship.orientation = 'h';
+    } else {
+        ship.orientation = 'v';
+    }
+
+    if (ship.orientation == 'h' && ship.x + ship.size > BOARD_SIZE) {
+        ship.x = BOARD_SIZE - ship.size;
+    } else if (ship.orientation == 'v' && ship.y + ship.size > BOARD_SIZE) {
+        ship.y = BOARD_SIZE - ship.size;
+    }
+
+    for (int i = 0; i < ship.size; i++) {
+        if (ship.orientation == 'h') {
+            board->board[ship.x + i][ship.y] = 'O';
+        } else {
+            board->board[ship.x][ship.y + i] = 'O';
+        }
+    }
+
+    board->ships[ship_size - 2] = ship;
+}
+
+void print_board(Board *board) {
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            printf("%c ", board->board[i][j]);
+        }
+        printf("\n");
+    }
+}
+
+void attack(Board *board, int x, int y, int attacker, int player) {
+    if (board->board[x][y] == 'O') {
+        for (int i = 0; i < 5; i++) {
+            Ship *ship = &(board->ships[i]);
+            if (ship->orientation == 'h') {
+                if (x == ship->x && y >= ship->y && y < ship->y + ship->size) {
+                    ship->hits++;
+                }
+            } else {
+                if (y == ship->y && x >= ship->x && x < ship->x + ship->size) {
+                    ship->hits++;
+                }
+            }
+
+            if (ship->hits == ship->size) {
+                printf("Barco destruido en el Tablero del Jugador %d en la posición (%d, %d) por el Jugador %d!\n", player, x, y, attacker);
+                for (int j = 0; j < ship->size; j++) {
+                    if (ship->orientation == 'h') {
+                        board->board[ship->x + j][ship->y] = '-';
+                    } else {
+                        board->board[ship->x][ship->y + j] = '-';
+                    }
+                }
+            }
+        }
+    } else {
+        printf("El Jugador %d ha bombardeado la posición (%d, %d) y ha fallado.\n", attacker, x, y);
+    }
+}
+
+void player_attack(Board *boards, int player, int x, int y, int num_players) {
+    for (int i = 0; i < num_players; i++) {
+        if (i != player) {
+            attack(&boards[i], x, y, player + 1, player + 1);
+        }
+    }
+}
+
+void sigkill_handler(int sig) {
+    printf("Señal SIGKILL recibida. Terminando proceso.\n");
+    exit(EXIT_SUCCESS);
+}
+
+int main() {
+    srand(time(NULL));
+
+    int num_players;
+    printf("Ingrese la cantidad de jugadores (entre 2 y 10): ");
+    scanf("%d", &num_players);
+
+    if (num_players < 2 || num_players > 10) {
+        printf("Número de jugadores no válido. El programa terminará.\n");
+        return 1;
+    }
+
+    signal(SIGKILL, sigkill_handler);
+
+    int **player_pipes = malloc(num_players * sizeof(int *));
+    if (player_pipes == NULL) {
+        printf("Error al asignar memoria. El programa terminará.\n");
+        return 1;
+    }
+
+    for (int i = 0; i < num_players; i++) {
+        player_pipes[i] = malloc(2 * sizeof(int));
+        if (player_pipes[i] == NULL) {
+            printf("Error al asignar memoria. El programa terminará.\n");
+            for (int j = 0; j < i; j++) {
+                free(player_pipes[j]);
+            }
+            free(player_pipes);
+            return 1;
+        }
+        if (pipe(player_pipes[i]) == -1) {
+            perror("Error al crear la tubería");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    pid_t *player_pids = malloc(num_players * sizeof(pid_t));
+    if (player_pids == NULL) {
+        printf("Error al asignar memoria. El programa terminará.\n");
+        for (int i = 0; i < num_players; i++) {
+            free(player_pipes[i]);
+        }
+        free(player_pipes);
+        return 1;
+    }
+
+    for (int i = 0; i < num_players; i++) {
+        pid_t pid = fork();
+        if (pid == -1) {
+            perror("Error al crear el proceso hijo");
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) { // Código del proceso hijo (jugador)
+            close(player_pipes[i][1]); // Cerramos el extremo de escritura de la tubería
+
+            char msg[MSG_SIZE];
+            read(player_pipes[i][0], msg, MSG_SIZE);
+            //printf("Jugador %d ha recibido el mensaje: %s\n", i + 1, msg);
+            close(player_pipes[i][0]); // Cerramos el extremo de lectura de la tubería
+            //exit(EXIT_SUCCESS);
+        } else { // Código del proceso padre (proceso central)
+            player_pids[i] = pid;
+            close(player_pipes[i][0]); // Cerramos el extremo de lectura de la tubería
+        }
+    }
+
+    // Código del proceso central
+    Board *boards = malloc(num_players * sizeof(Board));
+    if (boards == NULL) {
+        printf("Error al asignar memoria. El programa terminará.\n");
+        for (int i = 0; i < num_players; i++) {
+            free(player_pipes[i]);
+        }
+        free(player_pipes);
+        free(player_pids);
+        return 1;
+    }
+
+    for (int i = 0; i < num_players; i++) {
+        initialize_board(&boards[i]);
+        place_ship(&boards[i], 2);
+        place_ship(&boards[i], 2);
+        place_ship(&boards[i], 3);
+        place_ship(&boards[i], 3);
+        place_ship(&boards[i], 4);
+    }
+
+    for (int i = 0; i < num_players; i++) {
+        printf("\nTablero del Jugador %d:\n", i + 1);
+        print_board(&boards[i]);
+    }
+
+    for (int i = 0; i < num_players; i++) {
+        char message[MSG_SIZE] = "¡Es tu turno de atacar!\n";
+        write(player_pipes[i][1], message, MSG_SIZE);
+        close(player_pipes[i][1]); // Cerramos el extremo de escritura de la tubería
+    }
+
+    int turn = 0;
+    int remaining_players = num_players;
+    while (remaining_players > 1) {
+        int x, y;
+        printf("\nTurno %d: Jugador %d, ingrese la posición para atacar (x y): ", turn + 1, turn % num_players + 1);
+        scanf("%d %d", &x, &y);
+        if (x < 0 || x >= BOARD_SIZE || y < 0 || y >= BOARD_SIZE) {
+            printf("Posición inválida. Intente nuevamente.\n");
+            continue;
+        }
+
+        player_attack(boards, turn % num_players, x, y, num_players);
+
+        int ships_remaining = 0;
+        for (int i = 0; i < 5; i++) {
+            if (boards[turn % num_players].ships[i].hits < boards[turn % num_players].ships[i].size) {
+                ships_remaining++;
+            }
+        }
+        if (ships_remaining == 0) {
+            printf("\nJugador %d ha perdido!\n", turn % num_players + 1);
+            remaining_players--;
+            // Eliminar jugador del juego
+            close(player_pipes[turn % num_players][1]); // Cerramos el extremo de escritura de la tubería
+            for (int j = 0; j < BOARD_SIZE * BOARD_SIZE; j++) {
+                char msg[MSG_SIZE] = "¡Jugador eliminado!";
+                write(player_pipes[turn % num_players][1], msg, MSG_SIZE);
+            }
+            close(player_pipes[turn % num_players][1]); // Cerramos el extremo de escritura de la tubería
+        }
+
+        turn = (turn + 1) % num_players;
+    }
+
+    for (int i = 0; i < num_players; i++) {
+        free(player_pipes[i]);
+    }
+    free(player_pipes);
+    free(player_pids);
+    free(boards);
+
+    return 0;
+}
